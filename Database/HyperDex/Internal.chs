@@ -3,11 +3,11 @@
 module Database.HyperDex.Internal where
 
 import Foreign.Ptr
-import Foreign.ForeignPtr
 import Foreign.C.String
 import Foreign.C.Types
 
-enumToEnum = toEnum . fromIntegral
+cToEnum :: (Integral a, Enum b) => a -> b
+cToEnum = toEnum . fromIntegral
 
 #include <hyperclient.h>
 
@@ -19,13 +19,13 @@ enumToEnum = toEnum . fromIntegral
  { `String', `Int' } -> `Client' id #}
 
 {#fun unsafe destroy as ^
- { id `Client' } -> `()' #}
+ { id `Client' } -> `()' id #}
 
 {#fun unsafe add_space as ^
- { id `Client', `String' } -> `ReturnCode' enumToEnum #}
+ { id `Client', `String' } -> `ReturnCode' cToEnum #}
 
 {#fun unsafe rm_space as ^
- { id `Client', `String' } -> `ReturnCode' enumToEnum #}
+ { id `Client', `String' } -> `ReturnCode' cToEnum #}
 
 {#enum returncode as ReturnCode
  {underscoreToCase} deriving (Show, Eq) #}
