@@ -1,0 +1,18 @@
+name:                hyperdex
+version:             0.1.0.0
+synopsis:            
+description:         
+license:             BSD3
+license-file:        LICENSE
+author:              Sean Billig
+maintainer:          sean.billig@gmail.com
+category:            Database
+build-type:          Simple
+cabal-version:       >=1.8
+
+library
+  exposed-modules:     Database.HyperDex.Internal
+  build-depends:       base == 4.*
+  build-tools:	       c2hs
+  extra-libraries:     hyperclient
+--  includes:	       hyperclient.h
