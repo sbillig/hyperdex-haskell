@@ -2,6 +2,7 @@
 
 module Database.HyperDex.Internal where
 
+import Data.Int
 import Foreign.Ptr
 import Foreign.C.String
 import Foreign.C.Types
@@ -45,6 +46,12 @@ attributeType c s f = do
             then cToEnum rc
             else Success
   return (dt, rc')
+
+{#fun unsafe loop
+ { id `Client'
+ , `Int'
+ , alloca- `CInt' peek*
+ } -> `Int64' #}
 
 {#enum returncode as ReturnCode
  {underscoreToCase} deriving (Show, Eq) #}
