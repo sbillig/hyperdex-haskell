@@ -36,13 +36,13 @@ cToEnum = toEnum . fromIntegral
  ,`String' -- space
  ,`String' -- field
  , alloca- `CInt' peek*  -- Only set if the datatype is "Garbage".
- } -> `Hyperdatatype' cToEnum #}
+ } -> `Datatype' cToEnum #}
 
 
-attributeType :: Client -> String -> String -> IO (Hyperdatatype, ReturnCode)
+attributeType :: Client -> String -> String -> IO (Datatype, ReturnCode)
 attributeType c s f = do
   (dt, rc) <- c_attributeType c s f
-  let rc' = if dt == HyperdatatypeGarbage
+  let rc' = if dt == DatatypeGarbage
             then cToEnum rc
             else Success
   return (dt, rc')
@@ -55,6 +55,7 @@ attributeType c s f = do
 
 {#enum returncode as ReturnCode
  {underscoreToCase} deriving (Show, Eq) #}
-{#enum hyperdatatype as ^
- {underscoreToCase} deriving (Show, Eq) #}
+{#enum hyperdatatype as Datatype
+ {underscoreToCase}  with prefix = "hyper"
+ deriving (Show, Eq) #}
 
