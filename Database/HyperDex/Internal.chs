@@ -7,7 +7,6 @@ import Foreign.C.String
 import Foreign.C.Types
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Storable (peek)
-import Control.Applicative ((<$>))
 
 cToEnum :: (Integral a, Enum b) => a -> b
 cToEnum = toEnum . fromIntegral
@@ -35,18 +34,16 @@ cToEnum = toEnum . fromIntegral
  { id `Client'
  ,`String' -- space
  ,`String' -- field
- -- The status is only set if the datatype is Garbage,
- -- so we'll only "peek" the value when that's the case. See attributeType below.
- , alloca- `Ptr CInt' id
+ , alloca- `CInt' peek*  -- Only set if the datatype is "Garbage".
  } -> `Hyperdatatype' cToEnum #}
 
 
 attributeType :: Client -> String -> String -> IO (Hyperdatatype, ReturnCode)
 attributeType c s f = do
   (dt, rc) <- c_attributeType c s f
-  rc' <- if dt == HyperdatatypeGarbage
-         then cToEnum <$> peek rc
-         else return Success
+  let rc' = if dt == HyperdatatypeGarbage
+            then cToEnum rc
+            else Success
   return (dt, rc')
 
 {#enum returncode as ReturnCode
