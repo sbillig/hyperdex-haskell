@@ -111,7 +111,40 @@ get client space key = do
   c_get client space key status attrs attrs_sz
 
 {#enum returncode as ReturnCode
- {underscoreToCase} deriving (Show, Eq) #}
+ { SUCCESS	as Success
+ , NOTFOUND	as NotFound
+ , SEARCHDONE	as SearchDone
+ , CMPFAIL	as CmpFail
+ , READONLY	as ReadOnly
+
+   -- Error conditions
+ , UNKNOWNSPACE as UnknownSpace
+ , COORDFAIL	as CoordFail
+ , SERVERERROR	as ServerError
+ , POLLFAILED	as PollFailed
+ , OVERFLOW	as Overflow
+ , RECONFIGURE	as Reconfigure
+ , TIMEOUT	as Timeout
+ , UNKNOWNATTR	as UnknownAttr
+ , DUPEATTR	as DupeAttr
+ , NONEPENDING	as NonePending
+ , DONTUSEKEY	as DontUseKey
+ , WRONGTYPE	as WrongType
+ , NOMEM	as NoMem
+ , BADCONFIG	as BadConfig
+ , BADSPACE	as BadSpace
+ , DUPLICATE	as Duplicate
+ , INTERRUPTED	as Interrupted
+ , CLUSTER_JUMP as ClusterJump
+ , COORD_LOGGED as CoordLogged
+
+   -- This should never happen
+ , INTERNAL	as Internal
+ , EXCEPTION	as Exception
+ , GARBAGE	as Garbage
+ } deriving (Show, Eq) #}
+
+
 {#enum hyperdatatype as Datatype
  {underscoreToCase}  with prefix = "hyper"
  deriving (Show, Eq) #}
