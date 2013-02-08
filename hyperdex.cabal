@@ -1,7 +1,7 @@
 name:                hyperdex
 version:             0.1.0.0
 synopsis:            An incomplete client library for the HyperDex key-value store.
-description:         
+description:
 license:             BSD3
 license-file:        LICENSE
 author:              Sean Billig
@@ -18,7 +18,8 @@ source-repository head
 
 library
   exposed-modules:     Database.HyperDex.Internal
-  build-depends:       base == 4.*
+  build-depends:       base == 4.*,
+                       bytestring >= 0.9 && < 0.11
   build-tools:	       c2hs
   ghc-options:	       -Wall
   ghc-prof-options:    -auto-all
