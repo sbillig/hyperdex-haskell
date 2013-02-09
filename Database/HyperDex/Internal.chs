@@ -172,7 +172,6 @@ withCStringLenIntConv s f = withCStringLen s $ \(p, n) -> f (p, fromIntegral n)
 peekCStringLenIntConv :: Integral n => (CString, n) -> IO String
 peekCStringLenIntConv (s, n) = peekCStringLen (s, fromIntegral n)
 
-
 {#fun unsafe create as ^
  { `String', `Int' } -> `Client' id #}
 
@@ -224,19 +223,111 @@ get client space key = do
   attrs_sz <- malloc
   c_get client space key status attrs attrs_sz
 
-{#fun unsafe put as c_put
- { id `Client'
- , `String'                        -- space
- , `String'&                       -- key
- , withAttributes* `[Attribute]'&  -- attrs, attrs_sz
- , id `Ptr CInt' id                 -- status
- } -> `Int64' #}
+type CWriteFunction = Client -> CString -> CString -> CULong
+                    -> AttributePtr -> CULong -> Ptr CInt -> IO CLong
 
-put :: Client -> String -> String -> [Attribute] -> IO (Int64, Ptr CInt)
-put client space key as = do
-  status <- malloc
-  c_put client space key as status
+type WriteFunction = Client -> B.ByteString -> B.ByteString
+                   -> [Attribute] -> IO (CLong, Ptr CInt)
 
+writeCall :: CWriteFunction -> WriteFunction
+writeCall cfun client space key a =
+  B.useAsCString    space $ \spacep       ->
+  B.useAsCStringLen key   $ \(keyp, keyl) ->
+  withAttributes    a     $ \(asp, asl)   -> do
+    statp <- malloc
+    rid   <- cfun client spacep keyp (fromIntegral keyl) asp (fromIntegral asl) statp
+    return (rid, statp)
+
+
+put              :: WriteFunction
+put              = writeCall {#call put#}
+
+putIfNotExist    :: WriteFunction
+putIfNotExist    = writeCall {#call put_if_not_exist#}
+
+atomicAdd        :: WriteFunction
+atomicAdd        = writeCall {#call atomic_add#}
+
+atomicSub        :: WriteFunction
+atomicSub        = writeCall {#call atomic_sub#}
+
+atomicMul        :: WriteFunction
+atomicMul        = writeCall {#call atomic_mul#}
+
+atomicDiv        :: WriteFunction
+atomicDiv        = writeCall {#call atomic_div#}
+
+atomicMod        :: WriteFunction
+atomicMod        = writeCall {#call atomic_mod#}
+
+atomicAnd        :: WriteFunction
+atomicAnd        = writeCall {#call atomic_and#}
+
+atomicOr         :: WriteFunction
+atomicOr         = writeCall {#call atomic_or#}
+
+atomicXor        :: WriteFunction
+atomicXor        = writeCall {#call atomic_xor#}
+
+stringPrepend    :: WriteFunction
+stringPrepend    = writeCall {#call string_prepend#}
+
+stringAppend     :: WriteFunction
+stringAppend     = writeCall {#call string_append#}
+
+listLpush        :: WriteFunction
+listLpush        = writeCall {#call list_lpush#}
+
+listRpush        :: WriteFunction
+listRpush        = writeCall {#call list_rpush#}
+
+setAdd           :: WriteFunction
+setAdd           = writeCall {#call set_add#}
+
+setRemove        :: WriteFunction
+setRemove        = writeCall {#call set_remove#}
+
+setIntersect     :: WriteFunction
+setIntersect     = writeCall {#call set_intersect#}
+
+setUnion         :: WriteFunction
+setUnion         = writeCall {#call set_union#}
+
+mapAdd           :: WriteFunction
+mapAdd           = writeCall {#call map_add#}
+
+mapRemove        :: WriteFunction
+mapRemove        = writeCall {#call map_remove#}
+
+mapAtomicAdd     :: WriteFunction
+mapAtomicAdd     = writeCall {#call map_atomic_add#}
+
+mapAtomicSub     :: WriteFunction
+mapAtomicSub     = writeCall {#call map_atomic_sub#}
+
+mapAtomicMul     :: WriteFunction
+mapAtomicMul     = writeCall {#call map_atomic_mul#}
+
+mapAtomicDiv     :: WriteFunction
+mapAtomicDiv     = writeCall {#call map_atomic_div#}
+
+mapAtomicMod     :: WriteFunction
+mapAtomicMod     = writeCall {#call map_atomic_mod#}
+
+mapAtomicAnd     :: WriteFunction
+mapAtomicAnd     = writeCall {#call map_atomic_and#}
+
+mapAtomicOr      :: WriteFunction
+mapAtomicOr      = writeCall {#call map_atomic_or#}
+
+mapAtomicXor     :: WriteFunction
+mapAtomicXor     = writeCall {#call map_atomic_xor#}
+
+mapStringPrepend :: WriteFunction
+mapStringPrepend = writeCall {#call map_string_prepend#}
+
+mapStringAppend  :: WriteFunction
+mapStringAppend  = writeCall {#call map_string_append#}
 
 {#enum returncode as ReturnCode
  { SUCCESS	as Success
