@@ -17,7 +17,7 @@ import qualified  Data.ByteString.Internal as B
 #include <hyperdex.h>
 
 {#context lib="hyperclient" prefix="hyperclient"#}
-{#pointer *hyperclient as Client#}
+{#pointer *hyperclient as ClientPtr#}
 {#pointer *attribute as AttributePtr#}
 
 #c
@@ -173,19 +173,31 @@ peekCStringLenIntConv :: Integral n => (CString, n) -> IO String
 peekCStringLenIntConv (s, n) = peekCStringLen (s, fromIntegral n)
 
 {#fun unsafe create as ^
- { `String', `Int' } -> `Client' id #}
+ { `String', `Int' } -> `ClientPtr' id #}
 
-{#fun unsafe destroy as ^
- { id `Client' } -> `()' id #}
+withClientPtr :: Client -> (ClientPtr -> IO a) -> IO a
+withClientPtr (Client fp) action = withForeignPtr fp action
+
+data Client = Client (ForeignPtr ())
+
+connect :: String -> Int -> IO Client
+connect ip port = do
+  fp <- create ip port >>= newForeignPtr p_destroy
+  return $ Client fp
+
+foreign import ccall "hyperclient.h &hyperclient_destroy"
+  p_destroy :: FunPtr (Ptr () -> IO ())
 
 {#fun unsafe add_space as ^
- { id `Client', `String' } -> `ReturnCode' cToEnum #}
+ { withClientPtr* `Client'
+ , `String' } -> `ReturnCode' cToEnum #}
 
 {#fun unsafe rm_space as ^
- { id `Client', `String' } -> `ReturnCode' cToEnum #}
+ { withClientPtr* `Client'
+ , `String' } -> `ReturnCode' cToEnum #}
 
 {#fun unsafe attribute_type as c_attributeType
- { id `Client'
+ { withClientPtr* `Client'
  ,`String' -- space
  ,`String' -- field
  , alloca- `CInt' peek*  -- Only set if the datatype is "Garbage".
@@ -201,13 +213,13 @@ attributeType c s f = do
   return (dt, rc')
 
 {#fun unsafe loop
- { id `Client'
+ { withClientPtr* `Client'
  , `Int'
  , alloca- `ReturnCode' peekEnum*
  } -> `Int64' #}
 
 {#fun unsafe get as c_get
- { id `Client'
+ { id `ClientPtr'
  , `String'
  , `String'&                   -- key and key_sz
  , id `Ptr CInt' id            -- status
@@ -215,7 +227,7 @@ attributeType c s f = do
  , id `Ptr CULong' id          -- attrs_sz
  } -> `Int64' #}
 
-get :: Client -> String -> String
+get :: ClientPtr -> String -> String
     -> IO (Int64, Ptr CInt, Ptr AttributePtr, Ptr CULong)
 get client space key = do
   status <- malloc
@@ -223,10 +235,10 @@ get client space key = do
   attrs_sz <- malloc
   c_get client space key status attrs attrs_sz
 
-type CWriteFunction = Client -> CString -> CString -> CULong
+type CWriteFunction = ClientPtr -> CString -> CString -> CULong
                     -> AttributePtr -> CULong -> Ptr CInt -> IO CLong
 
-type WriteFunction = Client -> B.ByteString -> B.ByteString
+type WriteFunction = ClientPtr -> B.ByteString -> B.ByteString
                    -> [Attribute] -> IO (CLong, Ptr CInt)
 
 writeCall :: CWriteFunction -> WriteFunction
