@@ -9,9 +9,15 @@ import Foreign.C.String
 import Foreign.C.Types
 import Control.Applicative
 import Control.Monad
+import Control.Monad.Loops
 
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import qualified  Data.ByteString.Internal as B
+import qualified Data.ByteString.Internal as B
+import qualified Data.Map.Strict as M
+import Data.Map (Map)
+import Data.IORef
+import Control.Concurrent.MVar
 
 #include <hyperclient.h>
 #include <hyperdex.h>
@@ -28,17 +34,17 @@ typedef enum hyperdatatype hyperdatatype;
 #endc
 
 data Attribute = Attribute
-    { attrName  :: B.ByteString
+    { attrName  :: ByteString
     , attrValue :: Value
     } deriving (Eq, Show)
 
 data Value
-    = SingleGeneric B.ByteString
-    | SingleString  B.ByteString
+    = SingleGeneric ByteString
+    | SingleString  ByteString
     | SingleInt     Int64
     | SingleFloat   Double
-    | ListGeneric   [B.ByteString]
-    | ListString    [B.ByteString]
+    | ListGeneric   [ByteString]
+    | ListString    [ByteString]
     | ListInt       [Int64]
     | ListFloat     [Double]
       deriving (Eq, Show)
@@ -84,7 +90,7 @@ withAttributes as action =
 instance Storable Datatype where
     sizeOf _    = {#sizeof hyperdatatype#}
     alignment _ = 4
-    peek p = peekEnum (castPtr p :: Ptr {#type hyperdatatype#})
+    peek p   = cToEnum <$> peek (castPtr p :: Ptr {#type hyperdatatype#})
     poke p x = poke (castPtr p) (enumToC x :: {#type hyperdatatype#})
 
 datatype :: Value -> Datatype
@@ -137,7 +143,15 @@ peekBytes n p = do
   rest <- peekBytes (n - sz) (p `plusPtr` sz)
   return $ v : rest
 
-newtype LString = LString { unLString :: B.ByteString }
+-- | peekArray for types without a Storable instance
+peekMany :: (Ptr x -> IO a) -> Int -> Int -> Ptr x -> IO [a]
+peekMany p size count ptr | count <= 0 = return []
+                          | otherwise  = f (count - 1) []
+    where
+      f 0 acc = do e <- p ptr;                    return (e:acc)
+      f n acc = do e <- p (plusPtr ptr (n*size)); f (n-1) (e:acc)
+
+newtype LString = LString { unLString :: ByteString }
 instance Storable LString where
     alignment _ = 4
     sizeOf s = 4 + B.length (unLString s)
@@ -151,7 +165,7 @@ instance Storable LString where
       LString <$> B.packCStringLen (castPtr p, fromIntegral len)
 
 -- | Blindly copy bytestring into memory location.
-pokeBS :: Ptr Word8 -> B.ByteString -> IO ()
+pokeBS :: Ptr Word8 -> ByteString -> IO ()
 pokeBS p s = do
   let (fp, off, len) = B.toForeignPtr s
   withForeignPtr fp $ \sp -> do
@@ -163,92 +177,155 @@ cToEnum = toEnum . fromIntegral
 enumToC :: (Integral a, Enum b) => b -> a
 enumToC = fromIntegral . fromEnum
 
-peekEnum :: (Integral a, Storable a, Enum b) => Ptr a -> IO b
-peekEnum p = cToEnum <$> peek p
 
-withCStringLenIntConv :: Num n => String -> ((CString, n) -> IO a) -> IO a
-withCStringLenIntConv s f = withCStringLen s $ \(p, n) -> f (p, fromIntegral n)
+data Client = Client (ForeignPtr ()) Pending
 
-peekCStringLenIntConv :: Integral n => (CString, n) -> IO String
-peekCStringLenIntConv (s, n) = peekCStringLen (s, fromIntegral n)
+type Pending = IORef (Map ReqId Req)
 
-{#fun unsafe create as ^
- { `String', `Int' } -> `ClientPtr' id #}
+type ReqId = {#type int64_t#}
+data Req = WriteReq  (ForeignPtr CInt) (MVar Response)
+         | ReadReq   (ForeignPtr CInt) (ForeignPtr AttributePtr)
+                     (ForeignPtr CULong) (MVar Response)
+--         | SearchReq (ForeignPtr CInt) (ForeignPtr AttributePtr)
+--                     (ForeignPtr CULong) (Chan Response)
+
+data Response = EmptyResponse
+              | WriteResponse ReturnCode
+              | ReadResponse  ReturnCode [Attribute]
+                deriving Show
+
+fulfillResponse Nothing = return ()
+fulfillResponse (Just (WriteReq rcp m)) =
+    putMVar m =<< WriteResponse . cToEnum <$> withForeignPtr rcp peek
+fulfillResponse (Just (ReadReq rcp attrpp acp m)) = do
+  rc <- cToEnum      <$> withForeignPtr rcp peek
+  ct <- fromIntegral <$> withForeignPtr acp peek
+  attrp <- withForeignPtr attrpp peek
+  putStr "fulfill read: " >> print (rc, ct, attrp)
+  case rc of
+    Success -> do
+            as <- peekMany peekAttr {#sizeof attribute#} ct attrp
+            {#call destroy_attrs#} attrp (fromIntegral ct)
+            putMVar m $ ReadResponse rc as
+
+    _ -> putMVar m $   ReadResponse rc []
+
 
 withClientPtr :: Client -> (ClientPtr -> IO a) -> IO a
-withClientPtr (Client fp) action = withForeignPtr fp action
+withClientPtr (Client fp _) action = withForeignPtr fp action
 
-data Client = Client (ForeignPtr ())
-
-connect :: String -> Int -> IO Client
-connect ip port = do
-  fp <- create ip port >>= newForeignPtr p_destroy
-  return $ Client fp
+connect :: ByteString -> Int -> IO Client
+connect ip port =
+    B.useAsCString ip $ \ipp -> do
+      fp <- {#call create#} ipp (fromIntegral port) >>= newForeignPtr p_destroy
+      Client fp <$> newIORef (M.empty)
 
 foreign import ccall "hyperclient.h &hyperclient_destroy"
-  p_destroy :: FunPtr (Ptr () -> IO ())
+  p_destroy :: FunPtr (ClientPtr -> IO ())
 
-{#fun unsafe add_space as ^
- { withClientPtr* `Client'
- , `String' } -> `ReturnCode' cToEnum #}
+addPending :: Client -> ReqId -> Req -> IO ()
+addPending (Client _ p) i r = modifyIORef p $ M.insert i r
 
-{#fun unsafe rm_space as ^
- { withClientPtr* `Client'
- , `String' } -> `ReturnCode' cToEnum #}
+getPending :: Client -> ReqId -> IO (Maybe Req, Int)
+getPending (Client _ p) i = do
+  m <- readIORef p
+  let (mv, m') = M.updateLookupWithKey (\_ _ -> Nothing) i m
+      count = M.size m'
+  writeIORef p m'
+  return (mv, count)
 
-{#fun unsafe attribute_type as c_attributeType
- { withClientPtr* `Client'
- ,`String' -- space
- ,`String' -- field
- , alloca- `CInt' peek*  -- Only set if the datatype is "Garbage".
- } -> `Datatype' cToEnum #}
+numPending :: Client -> IO Int
+numPending (Client _ p) = M.size <$> readIORef p
+
+addSpace :: Client -> ByteString -> IO ReturnCode
+addSpace client desc =
+    withClientPtr  client $ \cptr ->
+    B.useAsCString desc   $ \sptr ->
+        cToEnum <$> {#call add_space#} cptr sptr
+
+rmSpace :: Client -> ByteString -> IO ReturnCode
+rmSpace client space =
+    withClientPtr  client $ \cptr ->
+    B.useAsCString space  $ \sptr ->
+        cToEnum <$> {#call rm_space#} cptr sptr
+
+attributeType :: Client -> ByteString -> ByteString -> IO (Datatype, ReturnCode)
+attributeType c s f =
+    withClientPtr  c $ \cptr ->
+    B.useAsCString s $ \sptr ->
+    B.useAsCString f $ \fptr ->
+    alloca           $ \stat ->
+        do
+          dt <- cToEnum <$> {#call attribute_type#} cptr sptr fptr stat
+          rc <- if dt == DatatypeGarbage
+                then cToEnum <$> peek stat
+                else return Success
+          return (dt, rc)
 
 
-attributeType :: Client -> String -> String -> IO (Datatype, ReturnCode)
-attributeType c s f = do
-  (dt, rc) <- c_attributeType c s f
-  let rc' = if dt == DatatypeGarbage
-            then cToEnum rc
-            else Success
-  return (dt, rc')
+loopAll :: Client -> Int -> IO (ReturnCode, Int)
+loopAll client timeout = iterateWhile test $ loop client timeout
+    where test (rc, ct) = rc == Success && ct > 0
 
-{#fun unsafe loop
- { withClientPtr* `Client'
- , `Int'
- , alloca- `ReturnCode' peekEnum*
- } -> `Int64' #}
+loop :: Client -> Int -> IO (ReturnCode, Int)
+loop client timeout =
+    withClientPtr client $ \cptr ->
+    alloca               $ \stat ->
+        do
+          rid <- {#call loop#} cptr (fromIntegral timeout) stat
+          rc <-  cToEnum <$> peek stat
 
-{#fun unsafe get as c_get
- { id `ClientPtr'
- , `String'
- , `String'&                   -- key and key_sz
- , id `Ptr CInt' id            -- status
- , id `Ptr AttributePtr' id    -- attrs
- , id `Ptr CULong' id          -- attrs_sz
- } -> `Int64' #}
+          count <- if rid >= 0
+                   then do (req, ct) <- getPending client rid
+                           fulfillResponse req
+                           return ct
+                   else numPending client
+          return (rc, count)
 
-get :: ClientPtr -> String -> String
-    -> IO (Int64, Ptr CInt, Ptr AttributePtr, Ptr CULong)
-get client space key = do
-  status <- malloc
-  attrs  <- malloc
-  attrs_sz <- malloc
-  c_get client space key status attrs attrs_sz
+
+get :: Client -> ByteString -> ByteString -> IO (MVar Response)
+get client space key =
+    withClientPtr     client $ \cptr ->
+    B.useAsCString    space  $ \spacep ->
+    B.useAsCStringLen key    $ \(keyp, keyl) ->
+        do
+          status   <- mallocForeignPtr
+          attrs    <- mallocForeignPtr
+          attrs_sz <- mallocForeignPtr
+          let kl = fromIntegral keyl
+
+          rid <- withForeignPtr status   $ \s  ->
+                 withForeignPtr attrs    $ \a  ->
+                 withForeignPtr attrs_sz $ \as ->
+                     {#call get#} cptr spacep keyp kl s a as
+
+          m   <- newEmptyMVar
+          addPending client rid $ ReadReq (castForeignPtr status) attrs attrs_sz m
+          return m
 
 type CWriteFunction = ClientPtr -> CString -> CString -> CULong
                     -> AttributePtr -> CULong -> Ptr CInt -> IO CLong
 
-type WriteFunction = ClientPtr -> B.ByteString -> B.ByteString
-                   -> [Attribute] -> IO (CLong, Ptr CInt)
+type WriteFunction = Client -> ByteString -> ByteString -> [Attribute]
+                   -> IO (MVar Response)
 
 writeCall :: CWriteFunction -> WriteFunction
 writeCall cfun client space key a =
-  B.useAsCString    space $ \spacep       ->
-  B.useAsCStringLen key   $ \(keyp, keyl) ->
-  withAttributes    a     $ \(asp, asl)   -> do
-    statp <- malloc
-    rid   <- cfun client spacep keyp (fromIntegral keyl) asp (fromIntegral asl) statp
-    return (rid, statp)
+  withClientPtr     client $ \cptr         ->
+  B.useAsCString    space  $ \spacep       ->
+  B.useAsCStringLen key    $ \(keyp, keyl) ->
+  withAttributes    a      $ \(asp, asl)   ->
+      do
+        let kl = fromIntegral keyl
+            al = fromIntegral asl
+
+        statp <- mallocForeignPtr
+
+        rid   <- withForeignPtr statp $ cfun cptr spacep keyp kl asp al
+        m     <- newEmptyMVar
+
+        addPending client rid $ WriteReq statp m
+        return m
 
 
 put              :: WriteFunction
