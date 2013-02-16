@@ -18,6 +18,7 @@ import qualified Data.Map.Strict as M
 import Data.Map (Map)
 import Data.IORef
 import Control.Concurrent.MVar
+import Control.Concurrent.Chan
 
 #include <hyperclient.h>
 #include <hyperdex.h>
@@ -183,32 +184,17 @@ data Client = Client (ForeignPtr ()) Pending
 type Pending = IORef (Map ReqId Req)
 
 type ReqId = {#type int64_t#}
+type ReqPayload = (ForeignPtr CInt, ForeignPtr AttributePtr, ForeignPtr CULong)
+
+
 data Req = WriteReq  (ForeignPtr CInt) (MVar Response)
-         | ReadReq   (ForeignPtr CInt) (ForeignPtr AttributePtr)
-                     (ForeignPtr CULong) (MVar Response)
---         | SearchReq (ForeignPtr CInt) (ForeignPtr AttributePtr)
---                     (ForeignPtr CULong) (Chan Response)
+         | ReadReq   ReqPayload (MVar Response)
+         | SearchReq ReqPayload (Chan Response)
 
 data Response = EmptyResponse
               | WriteResponse ReturnCode
               | ReadResponse  ReturnCode [Attribute]
                 deriving Show
-
-fulfillResponse Nothing = return ()
-fulfillResponse (Just (WriteReq rcp m)) =
-    putMVar m =<< WriteResponse . cToEnum <$> withForeignPtr rcp peek
-fulfillResponse (Just (ReadReq rcp attrpp acp m)) = do
-  rc <- cToEnum      <$> withForeignPtr rcp peek
-  ct <- fromIntegral <$> withForeignPtr acp peek
-  attrp <- withForeignPtr attrpp peek
-  putStr "fulfill read: " >> print (rc, ct, attrp)
-  case rc of
-    Success -> do
-            as <- peekMany peekAttr {#sizeof attribute#} ct attrp
-            {#call destroy_attrs#} attrp (fromIntegral ct)
-            putMVar m $ ReadResponse rc as
-
-    _ -> putMVar m $   ReadResponse rc []
 
 
 withClientPtr :: Client -> (ClientPtr -> IO a) -> IO a
@@ -270,17 +256,50 @@ loopAll client timeout = iterateWhile test $ loop client timeout
 loop :: Client -> Int -> IO (ReturnCode, Int)
 loop client timeout =
     withClientPtr client $ \cptr ->
-    alloca               $ \stat ->
-        do
-          rid <- {#call loop#} cptr (fromIntegral timeout) stat
-          rc <-  cToEnum <$> peek stat
+    alloca               $ \stat -> do
+      rid <- {#call loop#} cptr (fromIntegral timeout) stat
+      lrc <-  cToEnum <$> peek stat
+      count <- if rid >= 0
+               then handleResponse rid
+               else numPending client
+      return (lrc, count)
 
-          count <- if rid >= 0
-                   then do (req, ct) <- getPending client rid
-                           fulfillResponse req
-                           return ct
-                   else numPending client
-          return (rc, count)
+    where
+      readPayload :: ReqPayload -> IO (ReturnCode, [Attribute])
+      readPayload (rc', as', ac') = do
+        rc <- cToEnum      <$> withForeignPtr rc' peek
+        ac <- fromIntegral <$> withForeignPtr ac' peek
+        as <- withForeignPtr as' peek
+        attrs <- case rc of
+                   Success ->
+                       do attrs <- peekMany peekAttr {#sizeof attribute#} ac as
+                          {#call destroy_attrs#} as (fromIntegral ac)
+                          return attrs
+                   _ -> return []
+        return (rc, attrs)
+
+      handleResponse :: ReqId -> IO Int
+      handleResponse rid = do
+        (mreq, ct) <- getPending client rid
+        case mreq of
+          Nothing -> return ct
+          Just (WriteReq rcp m) ->
+              do
+                resp <- WriteResponse . cToEnum <$> withForeignPtr rcp peek
+                putMVar m resp
+                return ct
+          Just (ReadReq pl m) ->
+              do
+                (rc, as) <- readPayload pl
+                putMVar m $ ReadResponse rc as
+                return ct
+          Just req@(SearchReq pl m) ->
+              do
+                (rc, as) <- readPayload pl
+                writeChan m $ ReadResponse rc as
+                if rc == SearchDone
+                 then return ct
+                 else addPending client rid req >> return (ct + 1)
 
 
 get :: Client -> ByteString -> ByteString -> IO (MVar Response)
@@ -300,7 +319,8 @@ get client space key =
                      {#call get#} cptr spacep keyp kl s a as
 
           m   <- newEmptyMVar
-          addPending client rid $ ReadReq (castForeignPtr status) attrs attrs_sz m
+          addPending client rid $
+            ReadReq ((castForeignPtr status), attrs, attrs_sz) m
           return m
 
 type CWriteFunction = ClientPtr -> CString -> CString -> CULong
