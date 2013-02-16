@@ -1,6 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module Database.HyperDex.Internal where
+module Database.HyperDex.Internal.Types where
 
 import Data.Int
 import Data.Word
