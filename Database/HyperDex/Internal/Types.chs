@@ -19,7 +19,7 @@ import qualified Data.ByteString.Internal as B
 
 {#context lib="hyperclient" prefix="hyperclient"#}
 {#pointer *attribute as AttributePtr -> Attribute#}
-{#pointer *attribute_check as CheckPtr#}
+{#pointer *attribute_check as CheckPtr -> Check#}
 
 #c
 typedef struct hyperclient_attribute hyperclient_attribute;

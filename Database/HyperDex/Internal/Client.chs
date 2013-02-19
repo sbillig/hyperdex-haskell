@@ -165,6 +165,26 @@ get client space key =
             ReadReq ((castForeignPtr status), attrs, attrs_sz) m
           return m
 
+search :: Client -> ByteString -> [Check] -> IO (Chan Response)
+search client space preds =
+    withClientPtr client $ \cptr        ->
+    B.useAsCString space $ \spacep      ->
+    xwithArrayLen preds  $ \predl predp ->
+        do
+          status   <- mallocForeignPtr
+          attrs    <- mallocForeignPtr
+          attrs_sz <- mallocForeignPtr
+
+          rid <- withForeignPtr status   $ \s  ->
+                 withForeignPtr attrs    $ \a  ->
+                 withForeignPtr attrs_sz $ \as ->
+                     {#call search#} cptr spacep predp predl s a as
+
+          m   <- newChan
+          addPending client rid $
+            SearchReq ((castForeignPtr status), attrs, attrs_sz) m
+          return m
+
 
 
 type CWriteFunction = ClientPtr -> CString -> CString -> SizeT
