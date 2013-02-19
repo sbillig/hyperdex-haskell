@@ -1,5 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 module Database.HyperDex.Internal.Types where
 
 import Data.Int
@@ -18,19 +18,102 @@ import qualified Data.ByteString.Internal as B
 #include <hyperdex.h>
 
 {#context lib="hyperclient" prefix="hyperclient"#}
-{#pointer *attribute as AttributePtr#}
+{#pointer *attribute as AttributePtr -> Attribute#}
+{#pointer *attribute_check as CheckPtr#}
 
 #c
 typedef struct hyperclient_attribute hyperclient_attribute;
 typedef struct hyperclient_map_attribute hyperclient_map_attribute;
 typedef struct hyperclient_attribute_check hyperclient_attribute_check;
 typedef enum hyperdatatype hyperdatatype;
+typedef enum hyperpredicate hyperpredicate;
 #endc
 
 data Attribute = Attribute
     { attrName  :: ByteString
     , attrValue :: Value
     } deriving (Eq, Show)
+
+data Check = Check
+    { checkAttr :: Attribute
+    , checkPred :: Predicate
+    } deriving (Eq, Show)
+
+class XStorable a where
+    xpeek       :: Ptr a -> IO a
+    xpoke       :: Ptr a -> CString -> a -> IO ()
+    structSize  :: a -> Int
+    backingSize :: a -> Int
+
+instance XStorable Attribute where
+    xpeek p = do
+      dtype <- cToEnum      <$> {#get attribute.datatype#} p :: IO Datatype
+      size  <- fromIntegral <$> {#get attribute.value_sz#} p
+      vptr  <- {#get attribute.value#} p
+      value <- peekValue dtype size vptr
+      name  <- B.packCString =<< {#get attribute.attr#} p
+      return $ Attribute name value
+
+    xpoke p buf (Attribute k v) = do
+      pokeBS (castPtr buf) k
+      pokeByteOff buf klen (0 :: Word8)
+      pokeValue valp v
+      {#set attribute.attr#}     p $ buf
+      {#set attribute.value#}    p $ valp
+      {#set attribute.datatype#} p $ enumToC $ datatype v
+      {#set attribute.value_sz#} p $ fromIntegral size
+          where
+            size = sizeOfValue v
+            klen = B.length k
+            valp = plusPtr buf (klen + 1)
+
+    structSize _ = {#sizeof attribute#}
+    backingSize (Attribute k v) = B.length k + 1 + sizeOfValue v
+
+
+instance XStorable Check where
+    xpeek p = do
+      attr <- xpeek (castPtr p)
+      prd  <- cToEnum <$> {#get attribute_check.predicate#} p
+      return $ Check attr prd
+
+    xpoke p buf (Check attr prd) = do
+      xpoke (castPtr p) buf attr
+      {#set attribute_check.predicate#} p $ enumToC prd
+
+    structSize _ = {#sizeof attribute_check#}
+    backingSize (Check attr _) = backingSize attr
+
+
+peekAndDestroy :: Int -> Ptr Attribute -> IO [Attribute]
+peekAndDestroy ac as = do
+  attrs <- xpeekArray ac as
+  {#call destroy_attrs#} as (fromIntegral ac)
+  return attrs
+
+xwithArrayLen :: XStorable a => [a] -> (SizeT -> Ptr a -> IO b) -> IO b
+xwithArrayLen xs action =
+    allocaBytes (sbytes + bbytes) $ \p -> do
+      foldM_ f (p, plusPtr p sbytes) xs
+      action (fromIntegral $ length xs) p
+
+    where
+      sbytes = sum $ map structSize  xs
+      bbytes = sum $ map backingSize xs
+      f (sp, bp) a = xpoke sp bp a >>
+                     return (plusPtr sp (structSize a),
+                             plusPtr bp (backingSize a))
+
+xpeekArray :: forall a . XStorable a => Int -> Ptr a -> IO [a]
+xpeekArray count ptr | count <= 0 = return []
+                     | otherwise  = f (count - 1) []
+    where
+      f 0 acc = do e <- xpeek ptr;                    return (e:acc)
+      f n acc = do e <- xpeek (plusPtr ptr (n*size)); f (n-1) (e:acc)
+      size = structSize (undefined :: a)
+
+
+type SizeT = {#type size_t#}
 
 data Value
     = SingleGeneric ByteString
@@ -43,55 +126,6 @@ data Value
     | ListFloat     [Double]
       deriving (Eq, Show)
     -- TODO: sets and maps
-
-peekAndDestroy :: Int -> AttributePtr -> IO [Attribute]
-peekAndDestroy ac as = do
-  attrs <- peekMany peekAttr {#sizeof attribute#} ac as
-  {#call destroy_attrs#} as (fromIntegral ac)
-  return attrs
-
-peekAttr :: AttributePtr -> IO Attribute
-peekAttr p = do
-  dtype <- cToEnum      <$> {#get attribute.datatype#} p :: IO Datatype
-  size  <- fromIntegral <$> {#get attribute.value_sz#} p
-  vptr  <- {#get attribute.value#} p
-  value <- peekValue dtype size vptr
-  name  <- B.packCString =<< {#get attribute.attr#} p
-  return $ Attribute name value
-
-pokeAttr :: CString -> AttributePtr -> Attribute -> IO ()
-pokeAttr buf p (Attribute k v) = do
-  let size = sizeOfValue v
-      klen = B.length k
-      valp = plusPtr buf (klen + 1)
-  pokeBS (castPtr buf) k
-  pokeByteOff buf klen (0 :: Word8)
-  pokeValue valp v
-  {#set attribute.attr#}     p $ buf
-  {#set attribute.value#}    p $ valp
-  {#set attribute.datatype#} p $ enumToC $ datatype v
-  {#set attribute.value_sz#} p $ fromIntegral size
-
-sizeOfAttr :: Attribute -> Int
-sizeOfAttr (Attribute k v) = B.length k + 1 + sizeOfValue v
-
-withAttributes :: [Attribute] -> ((AttributePtr, CULong) -> IO a) -> IO a
-withAttributes as action =
-    allocaBytes (attsz + bufsz) $ \p -> do
-      foldM_ poker (plusPtr p attsz, p) as
-      action (castPtr p, fromIntegral $ length as)
-    where
-      attsz = length as * {#sizeof attribute#}
-      bufsz = sum $ map (sizeOfValue . attrValue) as
-      poker (buf, p) a = pokeAttr buf p a >>
-                         return (plusPtr buf (sizeOfAttr a),
-                                 plusPtr p {#sizeof attribute#})
-
-instance Storable Datatype where
-    sizeOf _    = {#sizeof hyperdatatype#}
-    alignment _ = 4
-    peek p   = cToEnum <$> peek (castPtr p :: Ptr {#type hyperdatatype#})
-    poke p x = poke (castPtr p) (enumToC x :: {#type hyperdatatype#})
 
 datatype :: Value -> Datatype
 datatype (SingleGeneric _) = DatatypeGeneric
@@ -135,47 +169,6 @@ pokeValue p (ListString     x) = pokeArray (castPtr p) $ map LString x
 pokeValue p (ListInt        x) = pokeArray (castPtr p) x
 pokeValue p (ListFloat      x) = pokeArray (castPtr p) x
 
-peekBytes :: Storable a => Int -> Ptr a -> IO [a]
-peekBytes 0 _ = return []
-peekBytes n p = do
-  v <- peek p
-  let sz = sizeOf v
-  rest <- peekBytes (n - sz) (p `plusPtr` sz)
-  return $ v : rest
-
--- | peekArray for types without a Storable instance
-peekMany :: (Ptr x -> IO a) -> Int -> Int -> Ptr x -> IO [a]
-peekMany p size count ptr | count <= 0 = return []
-                          | otherwise  = f (count - 1) []
-    where
-      f 0 acc = do e <- p ptr;                    return (e:acc)
-      f n acc = do e <- p (plusPtr ptr (n*size)); f (n-1) (e:acc)
-
-newtype LString = LString { unLString :: ByteString }
-instance Storable LString where
-    alignment _ = 4
-    sizeOf s = 4 + B.length (unLString s)
-    poke p s = do
-      let len = B.length (unLString s)
-      poke (castPtr p) (fromIntegral len :: Word32)
-      pokeBS (castPtr p) (unLString s)
-
-    peek p = do
-      len <- peek (castPtr p) :: IO Word32
-      LString <$> B.packCStringLen (castPtr p, fromIntegral len)
-
--- | Blindly copy bytestring into memory location.
-pokeBS :: Ptr Word8 -> ByteString -> IO ()
-pokeBS p s = do
-  let (fp, off, len) = B.toForeignPtr s
-  withForeignPtr fp $ \sp -> do
-    B.memcpy p (sp `plusPtr` off) (fromIntegral len)
-
-cToEnum :: (Integral a, Enum b) => a -> b
-cToEnum = toEnum . fromIntegral
-
-enumToC :: (Integral a, Enum b) => b -> a
-enumToC = fromIntegral . fromEnum
 
 
 {#enum returncode as ReturnCode
@@ -214,5 +207,58 @@ enumToC = fromIntegral . fromEnum
 
 
 {#enum hyperdatatype as Datatype
- {underscoreToCase}  with prefix = "hyper"
+ {underscoreToCase} with prefix = "hyper"
  deriving (Show, Eq) #}
+
+instance Storable Datatype where
+    sizeOf _    = {#sizeof hyperdatatype#}
+    alignment _ = 4
+    peek p   = cToEnum <$> peek (castPtr p :: Ptr {#type hyperdatatype#})
+    poke p x = poke (castPtr p) (enumToC x ::     {#type hyperdatatype#})
+
+{#enum hyperpredicate as Predicate
+ {underscoreToCase} with prefix = "hyperpredicate_"
+ deriving (Show, Eq) #}
+
+instance Storable Predicate where
+    sizeOf _    = {#sizeof hyperpredicate#}
+    alignment _ = 4
+    peek p   = cToEnum <$> peek (castPtr p :: Ptr {#type hyperpredicate#})
+    poke p x = poke (castPtr p) (enumToC x ::     {#type hyperpredicate#})
+
+
+
+
+peekBytes :: Storable a => Int -> Ptr a -> IO [a]
+peekBytes 0 _ = return []
+peekBytes n p = do
+  v <- peek p
+  let sz = sizeOf v
+  rest <- peekBytes (n - sz) (p `plusPtr` sz)
+  return $ v : rest
+
+newtype LString = LString { unLString :: ByteString }
+instance Storable LString where
+    alignment _ = 4
+    sizeOf s = 4 + B.length (unLString s)
+    poke p s = do
+      let len = B.length (unLString s)
+      poke (castPtr p) (fromIntegral len :: Word32)
+      pokeBS (castPtr p) (unLString s)
+
+    peek p = do
+      len <- peek (castPtr p) :: IO Word32
+      LString <$> B.packCStringLen (castPtr p, fromIntegral len)
+
+-- | Blindly copy bytestring into memory location.
+pokeBS :: Ptr Word8 -> ByteString -> IO ()
+pokeBS p s = do
+  let (fp, off, len) = B.toForeignPtr s
+  withForeignPtr fp $ \sp -> do
+    B.memcpy p (sp `plusPtr` off) (fromIntegral len)
+
+cToEnum :: (Integral a, Enum b) => a -> b
+cToEnum = toEnum . fromIntegral
+
+enumToC :: (Integral a, Enum b) => b -> a
+enumToC = fromIntegral . fromEnum

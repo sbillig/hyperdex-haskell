@@ -29,7 +29,7 @@ data Client = Client (ForeignPtr ()) Pending
 type Pending = IORef (Map ReqId Req)
 
 type ReqId = {#type int64_t#}
-type ReqPayload = (ForeignPtr CInt, ForeignPtr AttributePtr, ForeignPtr CULong)
+type ReqPayload = (ForeignPtr CInt, ForeignPtr (Ptr Attribute), ForeignPtr CULong)
 
 
 data Req = WriteReq  (ForeignPtr CInt) (MVar Response)
@@ -165,8 +165,10 @@ get client space key =
             ReadReq ((castForeignPtr status), attrs, attrs_sz) m
           return m
 
-type CWriteFunction = ClientPtr -> CString -> CString -> CULong
-                    -> AttributePtr -> CULong -> Ptr CInt -> IO CLong
+
+
+type CWriteFunction = ClientPtr -> CString -> CString -> SizeT
+                    -> Ptr Attribute -> SizeT -> Ptr CInt -> IO ReqId
 
 type WriteFunction = Client -> ByteString -> ByteString -> [Attribute]
                    -> IO (MVar Response)
@@ -176,14 +178,13 @@ writeCall cfun client space key a =
   withClientPtr     client $ \cptr         ->
   B.useAsCString    space  $ \spacep       ->
   B.useAsCStringLen key    $ \(keyp, keyl) ->
-  withAttributes    a      $ \(asp, asl)   ->
+  xwithArrayLen     a      $ \asl asp      ->
       do
         let kl = fromIntegral keyl
-            al = fromIntegral asl
 
         statp <- mallocForeignPtr
 
-        rid   <- withForeignPtr statp $ cfun cptr spacep keyp kl asp al
+        rid   <- withForeignPtr statp $ cfun cptr spacep keyp kl asp asl
         m     <- newEmptyMVar
 
         addPending client rid $ WriteReq statp m
@@ -244,6 +245,7 @@ setIntersect     = writeCall {#call set_intersect#}
 setUnion         :: WriteFunction
 setUnion         = writeCall {#call set_union#}
 
+{-
 mapAdd           :: WriteFunction
 mapAdd           = writeCall {#call map_add#}
 
@@ -279,3 +281,4 @@ mapStringPrepend = writeCall {#call map_string_prepend#}
 
 mapStringAppend  :: WriteFunction
 mapStringAppend  = writeCall {#call map_string_append#}
+-}
