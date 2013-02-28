@@ -25,9 +25,26 @@ import qualified Data.ByteString.Internal as B
 typedef struct hyperclient_attribute hyperclient_attribute;
 typedef struct hyperclient_map_attribute hyperclient_map_attribute;
 typedef struct hyperclient_attribute_check hyperclient_attribute_check;
+typedef enum hyperclient_returncode hyperclient_returncode;
 typedef enum hyperdatatype hyperdatatype;
 typedef enum hyperpredicate hyperpredicate;
 #endc
+
+type SizeT = {#type size_t#}
+type ReqId = {#type int64_t#}
+type Space = ByteString
+type Key   = ByteString
+
+type RawStatusPtr = Ptr {#type returncode#}
+type RawSizePtr   = Ptr SizeT
+type RawAttrPtr   = Ptr (Ptr Attribute)
+
+type StatusPtr = ForeignPtr {#type returncode#}
+type SizePtr   = ForeignPtr SizeT
+type AttrPtr   = ForeignPtr (Ptr Attribute)
+
+data Request = WriteReq StatusPtr
+             | ReadReq Bool StatusPtr AttrPtr SizePtr
 
 data Attribute = Attribute
     { attrName  :: ByteString
@@ -112,8 +129,6 @@ xpeekArray count ptr | count <= 0 = return []
       f n acc = do e <- xpeek (plusPtr ptr (n*size)); f (n-1) (e:acc)
       size = structSize (undefined :: a)
 
-
-type SizeT = {#type size_t#}
 
 data Value
     = SingleGeneric ByteString
