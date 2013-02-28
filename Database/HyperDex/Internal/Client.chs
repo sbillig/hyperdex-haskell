@@ -165,6 +165,20 @@ get client space key =
             ReadReq ((castForeignPtr status), attrs, attrs_sz) m
           return m
 
+del :: Client -> ByteString -> ByteString -> IO (MVar Response)
+del client space key =
+    withClientPtr     client $ \cptr ->
+    B.useAsCString    space  $ \spacep ->
+    B.useAsCStringLen key    $ \(keyp, keyl) ->
+        do
+          status <- mallocForeignPtr
+          rid <- withForeignPtr status $ \s ->
+                     {#call del#} cptr spacep keyp (fromIntegral keyl) s
+
+          m <- newEmptyMVar
+          addPending client rid $ WriteReq status m
+          return m
+
 search :: Client -> ByteString -> [Check] -> IO (Chan Response)
 search client space preds =
     withClientPtr client $ \cptr        ->
